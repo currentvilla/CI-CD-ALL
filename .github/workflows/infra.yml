@@ -1,0 +1,212 @@
+name: CI (Terraform plan/apply) and Deploy Java
+
+on:
+  push:
+    branches:
+      - main
+
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TF_DIR: tf    # Terraform の作業ディレクトリ（君の構成だと tf/）
+
+jobs:
+  # 1) Terraform: plan (runs on PRs and pushes that touch .tf files)
+  terraform:
+    name: Terraform - Plan
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: ${{ env.TF_DIR }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-1
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Check terraform fmt
+        run: terraform fmt -check -recursive
+
+      - name: Terraform Validate
+        run: terraform validate
+
+      - name: Terraform Plan
+        id: plan
+        run: |
+          # include ssh_public_key var if set (empty fallback)
+          terraform plan -input=false -no-color -out=plan.tfplan -var="ssh_public_key=${{ secrets.SSH_PUB_KEY || '' }}" || true
+          terraform show -no-color plan.tfplan > plan.txt || true
+          head -n 200 plan.txt > plan_summary.txt || true
+
+      - name: Upload plan artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: terraform-plan
+          path: |
+            plan.tfplan
+            plan_summary.txt
+
+  # 2) Apply: only on push to main (depends on terraform job)
+  apply:
+    name: Terraform - Apply (main only)
+    runs-on: ubuntu-latest
+    needs: terraform
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    defaults:
+      run:
+        working-directory: ${{ env.TF_DIR }}
+    outputs:
+      hosts: ${{ steps.set-hosts.outputs.hosts }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v2
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ap-northeast-1
+
+      - name: Terraform Init
+        run: terraform init -input=false
+
+      - name: Download plan artifact (if exists)
+        uses: actions/download-artifact@v4
+        with:
+          name: terraform-plan
+          path: .
+
+      - name: Terraform Apply (use plan.tfplan if present)
+        id: tf_apply
+        run: |
+          if [ -f plan.tfplan ]; then
+            echo "Applying existing plan..."
+            terraform apply -input=false -auto-approve plan.tfplan
+          else
+            echo "No plan artifact found — running plan+apply..."
+            terraform plan -input=false -no-color -out=plan.tfplan -var="ssh_public_key=${{ secrets.SSH_PUB_KEY || '' }}"
+            terraform apply -input=false -auto-approve plan.tfplan
+          fi
+
+      - name: Dump terraform outputs (json)
+        run: terraform output -json > tf_outputs.json
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Extract public IPs from terraform outputs and set as job output
+        id: set-hosts
+        run: |
+          HOSTS=""
+          if jq -e '.public_ips' tf_outputs.json >/dev/null 2>&1; then
+            HOSTS=$(jq -r '.public_ips | join(",")' tf_outputs.json)
+          elif jq -e '.public_ip' tf_outputs.json >/dev/null 2>&1; then
+            VAL=$(jq -r '.public_ip.value // .public_ip' tf_outputs.json)
+            HOSTS="$VAL"
+          else
+            HOSTS=$(jq -r 'to_entries[] | .value.value? // empty | tostring' tf_outputs.json | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | paste -sd "," - || true)
+          fi
+          echo "hosts=$HOSTS" >> $GITHUB_OUTPUT
+
+  # 3) Deploy: run Ansible after apply completes successfully
+  deploy:
+    name: Deploy Java (Ansible)
+    runs-on: ubuntu-latest
+    needs: apply
+    if: ${{ needs.apply.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    defaults:
+      run:
+        working-directory: .
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies (ansible & jq)
+        run: |
+          python -m pip install --upgrade pip
+          pip install "ansible>=7.0"
+          sudo apt-get update
+          sudo apt-get install -y jq sshpass || true
+
+      - name: Prepare SSH private key
+        env:
+          SSH_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+        run: |
+          echo "$SSH_KEY" > ./id_rsa
+          chmod 600 ./id_rsa
+
+      - name: Determine hosts (prefer secret, else use terraform output)
+        id: compute-hosts
+        run: |
+          if [ -n "${{ secrets.HOSTS }}" ]; then
+            echo "hosts=${{ secrets.HOSTS }}" >> $GITHUB_OUTPUT
+          elif [ -n "${{ needs.apply.outputs.hosts }}" ]; then
+            echo "hosts=${{ needs.apply.outputs.hosts }}" >> $GITHUB_OUTPUT
+          else
+            echo "hosts=" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Build inventory from computed hosts
+        run: |
+          mkdir -p inventory
+          echo "[java_servers]" > inventory/hosts.ini
+          HOSTS="${{ steps.compute-hosts.outputs.hosts }}"
+          if [ -n "$HOSTS" ]; then
+            IFS=',' read -ra ADDR <<< "$HOSTS"
+            for h in "${ADDR[@]}"; do
+              USER="${{ secrets.SSH_USER || 'ec2-user' }}"
+              echo "${h} ansible_user=${USER} ansible_ssh_private_key_file=./id_rsa ansible_host=${h}" >> inventory/hosts.ini
+            done
+            echo "Inventory:"
+            cat inventory/hosts.ini
+          else
+            echo "No hosts found. Ensure either secrets.HOSTS or terraform outputs.public_ips exist."
+            exit 1
+          fi
+
+      - name: Add hosts to known_hosts (ssh-keyscan)
+        run: |
+          mkdir -p ~/.ssh
+          touch ~/.ssh/known_hosts
+          HOSTS="${{ steps.compute-hosts.outputs.hosts }}"
+          IFS=',' read -ra ADDR <<< "$HOSTS"
+          for h in "${ADDR[@]}"; do
+            ssh-keygen -F "$h" || ssh-keyscan -H "$h" >> ~/.ssh/known_hosts || true
+          done
+          sed -n '1,20p' ~/.ssh/known_hosts || true
+
+      - name: Run Ansible playbook (install Java + deploy Spring jar if SPRING_BOOT_JAR_URL provided)
+        env:
+          ANSIBLE_HOST_KEY_CHECKING: "False"
+          SPRING_BOOT_JAR_URL: ${{ secrets.SPRING_BOOT_JAR_URL || '' }}
+        run: |
+          ansible-playbook -i inventory/hosts.ini ansible/playbook.yml --private-key ./id_rsa -u "${{ secrets.SSH_USER || 'ec2-user' }}"
+
+      - name: Cleanup private key (always)
+        if: always()
+        run: |
+          shred -u ./id_rsa || rm -f ./id_rsa || true

@@ -1,0 +1,170 @@
+---
+- name: Install Java (Corretto then fallback) and deploy Spring Boot
+  hosts: java_servers
+  become: true
+  gather_facts: true
+
+  vars:
+    java_version: 11
+    app_user: ec2-user              # Inventory / Secrets の SSH_USER に合わせて変更
+    app_dir: /opt/springapp
+    jar_url: "{{ lookup('env','SPRING_BOOT_JAR_URL') | default('') }}"  # 空ならダウンロードはスキップ
+    jar_name: app.jar
+    service_name: springapp
+    service_port: 8080
+    wait_timeout: 120
+    health_endpoint: "/actuator/health"
+
+  tasks:
+    - name: Ensure package cache is updated (dnf)
+      ansible.builtin.dnf:
+        update_cache: true
+      when: ansible_pkg_mgr == 'dnf'
+
+    - name: Try install Amazon Corretto (java-{{ java_version }})
+      ansible.builtin.dnf:
+        name: "java-{{ java_version }}-amazon-corretto-devel"
+        state: present
+      register: corretto_result
+      ignore_errors: true
+
+    - name: If Corretto install failed, try OpenJDK package
+      ansible.builtin.dnf:
+        name: "java-{{ java_version }}-openjdk-devel"
+        state: present
+      when: corretto_result is failed
+      register: openjdk_result
+      ignore_errors: true
+
+    - name: Fail if neither Corretto nor OpenJDK installed
+      ansible.builtin.fail:
+        msg: "Failed to install Java: neither amazon-corretto nor openjdk package installed."
+      when:
+        - corretto_result is failed
+        - openjdk_result is failed or openjdk_result is not defined
+
+    - name: Set java_home for Corretto if present
+      ansible.builtin.set_fact:
+        java_home: "/usr/lib/jvm/java-{{ java_version }}-amazon-corretto"
+      when: corretto_result is succeeded
+
+    - name: Set java_home for OpenJDK if Corretto not present
+      ansible.builtin.set_fact:
+        java_home: "/usr/lib/jvm/java-1.{{ java_version }}.0-openjdk"
+      when:
+        - corretto_result is failed
+        - openjdk_result is succeeded
+
+    - name: Create /etc/profile.d/java.sh to export JAVA_HOME and add to PATH (for interactive shells)
+      ansible.builtin.copy:
+        dest: /etc/profile.d/java.sh
+        content: |
+          #!/bin/sh
+          # Added by Ansible: JAVA_HOME and PATH
+          export JAVA_HOME={{ java_home | default('') }}
+          if [ -n "$JAVA_HOME" ]; then
+            export PATH=$JAVA_HOME/bin:$PATH
+          fi
+        owner: root
+        group: root
+        mode: '0644'
+      when: java_home is defined
+
+    - name: Ensure java is callable (check java -version)
+      ansible.builtin.command:
+        cmd: java -version
+      register: java_check
+      changed_when: false
+      failed_when: java_check.rc != 0
+
+    - name: Show java version
+      ansible.builtin.debug:
+        msg: "{{ java_check.stderr_lines }}"
+
+    # アプリ用ユーザ・ディレクトリ準備
+    - name: Ensure app user exists
+      ansible.builtin.user:
+        name: "{{ app_user }}"
+        shell: /bin/bash
+        system: false
+        create_home: false
+
+    - name: Ensure app directory exists
+      ansible.builtin.file:
+        path: "{{ app_dir }}"
+        state: directory
+        owner: "{{ app_user }}"
+        group: "{{ app_user }}"
+        mode: "0755"
+
+    # JAR のダウンロード（URL が指定されている場合のみ）
+    - name: Download Spring Boot jar if URL provided
+      ansible.builtin.get_url:
+        url: "{{ jar_url }}"
+        dest: "{{ app_dir }}/{{ jar_name }}"
+        mode: "0755"
+        force: true
+      when: jar_url != ""
+      register: download_result
+
+    - name: Fail if jar download was requested but failed
+      ansible.builtin.fail:
+        msg: "Failed to download Spring Boot jar from {{ jar_url }}"
+      when:
+        - jar_url != ""
+        - download_result is failed
+
+    # systemd ユニット作成（JAVA_HOME を明示）
+    - name: Create systemd service for spring app (with JAVA_HOME)
+      ansible.builtin.copy:
+        dest: "/etc/systemd/system/{{ service_name }}.service"
+        content: |
+          [Unit]
+          Description=Spring Boot App ({{ service_name }})
+          After=network.target
+
+          [Service]
+          User={{ app_user }}
+          Environment="JAVA_HOME={{ java_home | default('') }}"
+          Environment="PATH={{ java_home | default('') }}/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin"
+          ExecStart=/usr/bin/java -jar {{ app_dir }}/{{ jar_name }}
+          WorkingDirectory={{ app_dir }}
+          SuccessExitStatus=143
+          Restart=on-failure
+          RestartSec=5
+
+          [Install]
+          WantedBy=multi-user.target
+        owner: root
+        group: root
+        mode: '0644'
+      notify: daemon-reload
+
+    - name: Ensure service is enabled and started
+      ansible.builtin.systemd:
+        name: "{{ service_name }}"
+        enabled: true
+        state: started
+      register: systemd_result
+
+    - name: Wait for app port to be open
+      ansible.builtin.wait_for:
+        host: "{{ ansible_host | default(inventory_hostname) }}"
+        port: "{{ service_port }}"
+        timeout: "{{ wait_timeout }}"
+
+    - name: Health check - call actuator health endpoint (retry until OK)
+      ansible.builtin.uri:
+        url: "http://{{ ansible_host | default(inventory_hostname) }}:{{ service_port }}{{ health_endpoint }}"
+        method: GET
+        return_content: false
+        status_code: 200
+      register: health_check
+      retries: 6
+      delay: 5
+      until: health_check.status == 200
+
+  handlers:
+    - name: daemon-reload
+      ansible.builtin.command: systemctl daemon-reload
+      become: true
