@@ -11,7 +11,7 @@ permissions:
   contents: read
 
 env:
-  TF_DIR: tf    # Terraform の作業ディレクトリ（君の構成だと tf/）
+  TF_DIR: tf    # Terraform の作業ディレクトリ
 
 jobs:
   # 1) Terraform: plan (runs on PRs and pushes that touch .tf files)
@@ -47,10 +47,26 @@ jobs:
       - name: Terraform Plan
         id: plan
         run: |
-          # include ssh_public_key var if set (empty fallback)
-          terraform plan -input=false -no-color -out=plan.tfplan -var="ssh_public_key=${{ secrets.SSH_PUB_KEY || '' }}" || true
-          terraform show -no-color plan.tfplan > plan.txt || true
-          head -n 200 plan.txt > plan_summary.txt || true
+          set -euo pipefail
+          # Build var args only if secrets.SSH_PUB_KEY is set and non-empty
+          VAR_ARGS=""
+          if [ -n "${{ secrets.SSH_PUB_KEY }}" ]; then
+            # escape single quotes in the secret
+            PUBKEY_ESCAPED=$(printf "%s" "${{ secrets.SSH_PUB_KEY }}" | sed "s/'/'\"'\"'/g")
+            VAR_ARGS="-var=ssh_public_key='${PUBKEY_ESCAPED}'"
+          fi
+
+          # run plan, produce plan.tfplan in TF_DIR
+          terraform plan -input=false -no-color -out=plan.tfplan ${VAR_ARGS} || true
+
+          # produce a short human readable summary
+          if [ -f plan.tfplan ]; then
+            terraform show -no-color plan.tfplan > plan.txt || true
+            head -n 200 plan.txt > plan_summary.txt || true
+          else
+            echo "No plan.tfplan produced (plan may have failed)."
+            echo "" > plan_summary.txt
+          fi
 
       - name: Upload plan artifact
         if: always()
@@ -94,10 +110,35 @@ jobs:
         with:
           name: terraform-plan
           path: .
+      
+      - name: Prepare plan file (use downloaded artifact if present)
+        id: prepare-plan
+        run: |
+          set -euo pipefail
+          # Possibilities:
+          # - tf/plan.tfplan (already in TF_DIR if created on runner)
+          # - ./terraform-plan/plan.tfplan (download-artifact creates a folder named after artifact)
+          if [ -f plan.tfplan ]; then
+            echo "Using plan.tfplan in TF_DIR."
+          elif [ -f terraform-plan/plan.tfplan ]; then
+            mv terraform-plan/plan.tfplan ./plan.tfplan
+          elif [ -f ../terraform-plan/plan.tfplan ]; then
+            mv ../terraform-plan/plan.tfplan ./plan.tfplan
+          else
+            echo "No plan.tfplan found from artifact. Will run terraform plan+apply."
+          fi
+          ls -la || true
 
       - name: Terraform Apply (use plan.tfplan if present)
         id: tf_apply
-        run: |
+        run: |   
+          set -euo pipefail
+          VAR_ARGS=""
+          if [ -n "${{ secrets.SSH_PUB_KEY }}" ]; then
+            PUBKEY_ESCAPED=$(printf "%s" "${{ secrets.SSH_PUB_KEY }}" | sed "s/'/'\"'\"'/g")
+            VAR_ARGS="-var=ssh_public_key='${PUBKEY_ESCAPED}'"
+          fi
+          
           if [ -f plan.tfplan ]; then
             echo "Applying existing plan..."
             terraform apply -input=false -auto-approve plan.tfplan
