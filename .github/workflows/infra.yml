@@ -141,12 +141,11 @@ jobs:
       - name: Prepare optional ssh.auto.tfvars (from secret) if provided
         if: env.SSH_PUB_KEY != ''
         run: |
-          # Create ssh.auto.tfvars in TF_DIR (ensure idempotent)
-          cat > ssh.auto.tfvars <<'TFVARS'
-          ssh_public_key = <<'KEY'
-          ${{ secrets.SSH_PUB_KEY }}
-          KEY
-          TFVARS
+          # create ssh.auto.tfvars that Terraform can parse
+          # Use a normal quoted string in tfvars (avoid <<'KEY' which caused parse errors)
+          cat > ssh.auto.tfvars <<'EOF'
+          ssh_public_key = "${{ secrets.SSH_PUB_KEY }}"
+          EOF
           echo "Created ssh.auto.tfvars (length: $(wc -c < ssh.auto.tfvars) bytes)"
 
       - name: Terraform Apply (use plan.tfplan if present)
