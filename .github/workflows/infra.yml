@@ -1,18 +1,22 @@
 name: CI (Terraform plan/apply) and Deploy Java
 
 on:
+  pull_request:
+    branches:
+      - main
+    paths:
+      - 'tf/**'
   push:
     branches:
       - main
     paths:
       - 'tf/**'
-  workflow_dispatch:
 
 permissions:
   contents: read
 
 env:
-  TF_DIR: tf    # Terraform の作業ディレクトリ（必要なら変更）
+  TF_DIR: tf    
 
 jobs:
   # 1) Terraform Plan
