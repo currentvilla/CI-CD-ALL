@@ -50,13 +50,17 @@ jobs:
       - name: Prepare optional ssh.auto.tfvars (from secret) if provided
         if: env.SSH_PUB_KEY != ''
         run: |
-          # create a tfvars file that defines ssh_public_key variable
-          cat > ssh.auto.tfvars <<'TFVARS'
-          ssh_public_key = <<'KEY'
-          ${{ secrets.SSH_PUB_KEY }}
-          KEY
-          TFVARS
+          # remove any previous file to avoid leftover incorrect content
+          rm -f ssh.auto.tfvars
+          # create a proper tfvars file (use double quotes for Terraform)
+          cat > ssh.auto.tfvars <<'EOF'
+          ssh_public_key = "${{ secrets.SSH_PUB_KEY }}"
+          EOF
           echo "Created ssh.auto.tfvars (length: $(wc -c < ssh.auto.tfvars) bytes)"
+
+      - name: "Debug: list TF dir files"
+        run: |
+          ls -la
 
       - name: Terraform Plan (create plan.tfplan)
         id: plan
