@@ -81,14 +81,22 @@ jobs:
         run: |
           ls -la
 
+      - name: Debug before upload - show absolute paths
+        run: |
+          echo "Workspace: $GITHUB_WORKSPACE"
+          echo "TF_DIR: ${{ env.TF_DIR }}"
+          ls -la "${{ env.TF_DIR }}" || true
+          stat -c '%n %s' "${{ env.TF_DIR }}/plan.tfplan" || true
+
+
       - name: Upload plan artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: terraform-plan
           path: |
-            plan.tfplan
-            plan_summary.txt
+            ${{ env.TF_DIR }}/plan.tfplan
+            ${{ env.TF_DIR }}/plan_summary.txt
 
   # 2) Terraform Apply (only on push to main)
   terraform-apply:
