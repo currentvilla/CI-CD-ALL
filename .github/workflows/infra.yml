@@ -19,7 +19,6 @@ env:
   TF_DIR: tf    
 
 jobs:
-  # 1) Terraform Plan
   terraform-plan:
     name: Terraform - Plan
     runs-on: ubuntu-latest
@@ -102,7 +101,6 @@ jobs:
             ${{ env.TF_DIR }}/plan.tfplan
             ${{ env.TF_DIR }}/plan_summary.txt
 
-  # 2) Terraform Apply (only on push to main)
   terraform-apply:
     name: Terraform - Apply
     runs-on: ubuntu-latest
@@ -197,7 +195,6 @@ jobs:
           fi
           echo "hosts=$HOSTS" >> $GITHUB_OUTPUT
 
-  # 3) Deploy: run Ansible after apply completes successfully
   deploy:
     name: Deploy Java (Ansible)
     runs-on: ubuntu-latest
