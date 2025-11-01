@@ -171,27 +171,37 @@ jobs:
             terraform apply -input=false -auto-approve plan.tfplan
           fi
 
-      - name: Dump terraform outputs (json)
+      - name: Dump terraform outputs (json) and debug state
         run: |
-         echo "PWD: $(pwd)"
-         echo "Terraform version: $(terraform -version | head -n1)"
-         echo "---- terraform output -json ----"
-         terraform output -json > tf_outputs.json || true
-         echo "Exit status: $?"
-         echo "---- tf_outputs.json (raw) ----"
-         cat tf_outputs.json || true
-         echo "---- jq pretty ----"
-         # if jq is unavailable, install temporarily
-         if ! command -v jq >/dev/null 2>&1; then
-           sudo apt-get update -y
-           sudo apt-get install -y jq
-         fi
-         jq -C '.' tf_outputs.json || true
-         echo "---- terraform state list (if available) ----"
-         terraform state list || true
-         echo "---- show specific outputs ----"
-         terraform output public_ips || true
-         terraform output public_ip || true
+          set -euo pipefail
+
+          echo "PWD: $(pwd)"
+          echo "Terraform version: $(terraform -version | head -n1 || true)"
+
+          echo "---- capture pure JSON from terraform output -json ----"
+          # Ensure we capture only the JSON part (strip any leading garbage that some runners/wrappers may emit)
+          # We detect the first line that begins with '{' and print from there.
+          terraform output -json 2>/dev/null | awk 'BEGIN{p=0} /^\s*{/ {p=1} p{print}' > tf_outputs.json || true
+
+          echo "Exit status: $?"
+          echo "---- tf_outputs.json (raw) ----"
+          sed -n '1,200p' tf_outputs.json || true
+
+          # Ensure jq is available
+          if ! command -v jq >/dev/null 2>&1; then
+            sudo apt-get update -y
+            sudo apt-get install -y jq
+          fi
+
+          echo "---- pretty print via jq ----"
+          jq -C '.' tf_outputs.json || true
+
+          echo "---- terraform state list ----"
+          terraform state list || true
+
+          echo "---- show specific outputs (human) ----"
+          terraform output public_ips || true
+          terraform output public_ip || true
 
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
