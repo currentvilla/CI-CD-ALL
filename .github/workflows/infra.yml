@@ -171,22 +171,24 @@ jobs:
             terraform apply -input=false -auto-approve plan.tfplan
           fi
       
-      - name: Dump terraform outputs (json) and debug state
+      - name: Dump terraform outputs (json) and save
         run: |
-         set -euo pipefail
-         echo "PWD: $(pwd)"
-         echo "Terraform version: $(terraform -version | head -n1 || true)"
-         terraform output -json 2>/dev/null | awk 'BEGIN{p=0} /^\s*{/ {p=1} p{print}' > tf_outputs.json || true
-         echo "Exit status: $?"
-         sed -n '1,200p' tf_outputs.json || true
-         if ! command -v jq >/dev/null 2>&1; then
-           sudo apt-get update -y
-           sudo apt-get install -y jq
-         fi
-         jq '.' tf_outputs.json || true
-         terraform state list || true
-         terraform output public_ips || true
-         terraform output public_ip || true
+          set -euo pipefail
+          cd ${{ env.TF_DIR }}
+          terraform output -json > tf_outputs.json || true
+          echo "PWD: $(pwd)"
+          echo "ls -la:"
+          ls -la || true
+          echo "tf_outputs.json head:"
+          sed -n '1,200p' tf_outputs.json || true
+
+      - name: Upload tf_outputs.json artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tf-outputs
+          path: ${{ env.TF_DIR }}/tf_outputs.json
+
 
       - name: Upload tf_outputs.json artifact
         if: always()
@@ -262,9 +264,22 @@ jobs:
           name: tf-outputs
           path: .
 
+        - name: Debug: show downloaded artifacts and tf_outputs.json
+        run: |
+          echo "Workspace: $GITHUB_WORKSPACE"
+          echo "TF_DIR: ${{ env.TF_DIR }}"
+          echo "ls -la (root):"
+          ls -la || true
+          echo "ls -la (TF_DIR):"
+          ls -la "${{ env.TF_DIR }}" || true
+          echo "tf_outputs.json exists?:"
+          if [ -f tf_outputs.json ]; then echo "found tf_outputs.json in root"; sed -n '1,200p' tf_outputs.json; fi
+          if [ -f "${{ env.TF_DIR }}/tf_outputs.json" ]; then echo "found tf_outputs.json in TF_DIR"; sed -n '1,200p' "${{ env.TF_DIR }}/tf_outputs.json"; fi  
+
       - name: Determine hosts (prefer secret, else use terraform artifact)
         id: compute-hosts
-        run: |
+        run: |          
+          set -euo pipefail
           if [ -n "${{ secrets.HOSTS || '' }}" ]; then
             echo "hosts=${{ secrets.HOSTS }}" >> $GITHUB_OUTPUT
             exit 0
@@ -275,17 +290,15 @@ jobs:
             exit 0
           fi
 
+          HOSTS=""
           if [ -f tf_outputs.json ]; then
-            if command -v jq >/dev/null 2>&1; then
-              HOSTS=$(jq -r '.public_ips.value | join(",")' tf_outputs.json 2>/dev/null || true)
-            else
-              HOSTS=$(grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' tf_outputs.json | paste -sd "," - || true)
-            fi
-            echo "hosts=${HOSTS}" >> $GITHUB_OUTPUT
-            exit 0
+            HOSTS=$(jq -r '.public_ips.value | join(",")' tf_outputs.json 2>/dev/null || true)
+          elif [ -f "${{ env.TF_DIR }}/tf_outputs.json" ]; then
+            HOSTS=$(jq -r '.public_ips.value | join(",")' "${{ env.TF_DIR }}/tf_outputs.json" 2>/dev/null || true)
           fi
 
-          echo "hosts=" >> $GITHUB_OUTPUT    
+          echo "Determined hosts (from artifact/needs/secrets): ${HOSTS}"
+          echo "hosts=${HOSTS}" >> $GITHUB_OUTPUT
 
       - name: Build inventory from computed hosts
         run: |
