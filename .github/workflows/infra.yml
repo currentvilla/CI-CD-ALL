@@ -170,38 +170,24 @@ jobs:
             terraform plan -input=false -no-color -out=plan.tfplan
             terraform apply -input=false -auto-approve plan.tfplan
           fi
-
+      
       - name: Dump terraform outputs (json) and debug state
         run: |
-          set -euo pipefail
+         set -euo pipefail
+         echo "PWD: $(pwd)"
+         echo "Terraform version: $(terraform -version | head -n1 || true)"
+         terraform output -json 2>/dev/null | awk 'BEGIN{p=0} /^\s*{/ {p=1} p{print}' > tf_outputs.json || true
+         echo "Exit status: $?"
+         sed -n '1,200p' tf_outputs.json || true
+         if ! command -v jq >/dev/null 2>&1; then
+           sudo apt-get update -y
+           sudo apt-get install -y jq
+         fi
+         jq '.' tf_outputs.json || true
+         terraform state list || true
+         terraform output public_ips || true
+         terraform output public_ip || true
 
-          echo "PWD: $(pwd)"
-          echo "Terraform version: $(terraform -version | head -n1 || true)"
-
-          echo "---- capture pure JSON from terraform output -json ----"
-          # Ensure we capture only the JSON part (strip any leading garbage that some runners/wrappers may emit)
-          # We detect the first line that begins with '{' and print from there.
-          terraform output -json 2>/dev/null | awk 'BEGIN{p=0} /^\s*{/ {p=1} p{print}' > tf_outputs.json || true
-
-          echo "Exit status: $?"
-          echo "---- tf_outputs.json (raw) ----"
-          sed -n '1,200p' tf_outputs.json || true
-
-          # Ensure jq is available
-          if ! command -v jq >/dev/null 2>&1; then
-            sudo apt-get update -y
-            sudo apt-get install -y jq
-          fi
-
-          echo "---- pretty print via jq ----"
-          jq -C '.' tf_outputs.json || true
-
-          echo "---- terraform state list ----"
-          terraform state list || true
-
-          echo "---- show specific outputs (human) ----"
-          terraform output public_ips || true
-          terraform output public_ip || true
 
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
@@ -210,71 +196,24 @@ jobs:
         id: set-hosts
         run: |
           set -euo pipefail
-          TF_OUT="tf_outputs.json"
-          # Ensure we are in TF_DIR (if defaults.run set)
-          echo "PWD: $(pwd)"
-          if [ ! -f "$TF_OUT" ]; then
-            echo "tf_outputs.json not found at $(pwd)/$TF_OUT"
-            echo "hosts=" >> $GITHUB_OUTPUT
-            exit 0
-          fi
-
-          # Use python to safely parse JSON and extract hosts
-          HOSTS=$(python3 - <<'PY'
-          import json,sys
-          fn = "tf_outputs.json"
-          try:
-              with open(fn, 'r', encoding='utf-8') as f:
-                data = json.load(f)
-          except Exception as e:
-            # If parse fails, print nothing
-            # (we avoid printing secret data; this is just for flow)
-            sys.exit(0)
-
-          # Try the common shapes
-          hosts = []
-          if "public_ips" in data and isinstance(data["public_ips"], dict):
-              # expected terraform JSON shape: { "public_ips": { "value": [...] } }
-              val = data["public_ips"].get("value")
-              if isinstance(val, list):
-                  hosts = [str(x) for x in val if x is not None]
-          elif "public_ip" in data and isinstance(data["public_ip"], dict):
-              val = data["public_ip"].get("value")
-              if val:
-                  hosts = [str(val)]
-          else:
-              # Fallback: try to find any values that look like IPv4 addresses
-              import re
-              def find_ips(obj):
-                  ips = []
-                  if isinstance(obj, dict):
-                     for v in obj.values():
-                         ips += find_ips(v)
-                  elif isinstance(obj, list):
-                      for v in obj:
-                          ips += find_ips(v)
-                  elif isinstance(obj, str):
-                      if re.match(r'^([0-9]{1,3}\.){3}[0-9]{1,3}$', obj):
-                          ips.append(obj)
-                  return ips
-              hosts = find_ips(data)
-
-          # join into comma-separated string
-          if hosts:
-              print(",".join(hosts))
-          # else print nothing (empty)
-          PY
-          )
-
-          # Trim and fallback
-          HOSTS=$(echo "${HOSTS}" | tr -d '\r' || true)
-          if [ -n "${HOSTS}" ]; then
-            echo "Found hosts: ${HOSTS}"
-            echo "hosts=${HOSTS}" >> $GITHUB_OUTPUT
+          HOSTS=""
+          if [ -f tf_outputs.json ]; then
+            JSON_FILE="tf_outputs.json"
+          elif [ -f ${{ env.TF_DIR }}/tf_outputs.json ]; then
+            JSON_FILE="${{ env.TF_DIR }}/tf_outputs.json"
           else
-            echo "No hosts found in tf_outputs.json"
-            echo "hosts=" >> $GITHUB_OUTPUT
+            terraform output -json > tf_outputs.json || true
+            JSON_FILE="tf_outputs.json"
           fi
+          if jq -e '.public_ips.value' "$JSON_FILE" >/dev/null 2>&1; then
+            HOSTS=$(jq -r '.public_ips.value | join(",")' "$JSON_FILE")
+          elif jq -e '.public_ip.value' "$JSON_FILE" >/dev/null 2>&1; then
+            HOSTS=$(jq -r '.public_ip.value' "$JSON_FILE")
+          else
+            HOSTS=$(jq -r '...|strings' "$JSON_FILE" 2>/dev/null | grep -Eo '([0-9]{1,3}\.){3}[0-9]{1,3}' | paste -sd "," - || true)
+          fi
+          echo "Determined hosts: ${HOSTS}"
+          echo "hosts=${HOSTS}" >> $GITHUB_OUTPUT
 
   deploy:
     name: Deploy Java (Ansible)
