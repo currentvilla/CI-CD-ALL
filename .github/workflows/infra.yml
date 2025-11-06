@@ -228,6 +228,8 @@ jobs:
     runs-on: ubuntu-latest
     needs: terraform-apply
     if: ${{ needs.terraform-apply.result == 'success' && github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+    env:
+      TF_DIR: tf
     defaults:
       run:
         working-directory: .
@@ -264,21 +266,26 @@ jobs:
           name: tf-outputs
           path: .
 
-        - name: Debug: show downloaded artifacts and tf_outputs.json
+      - name: show downloaded artifacts and tf_outputs.json
         run: |
           echo "Workspace: $GITHUB_WORKSPACE"
-          echo "TF_DIR: ${{ env.TF_DIR }}"
+          echo "TF_DIR: $TF_DIR"
           echo "ls -la (root):"
           ls -la || true
           echo "ls -la (TF_DIR):"
-          ls -la "${{ env.TF_DIR }}" || true
-          echo "tf_outputs.json exists?:"
-          if [ -f tf_outputs.json ]; then echo "found tf_outputs.json in root"; sed -n '1,200p' tf_outputs.json; fi
-          if [ -f "${{ env.TF_DIR }}/tf_outputs.json" ]; then echo "found tf_outputs.json in TF_DIR"; sed -n '1,200p' "${{ env.TF_DIR }}/tf_outputs.json"; fi  
+          ls -la "$TF_DIR" || true
+          if [ -f tf_outputs.json ]; then
+            echo "found tf_outputs.json in root"
+            sed -n '1,200p' tf_outputs.json
+          fi
+          if [ -f "$TF_DIR/tf_outputs.json" ]; then
+            echo "found tf_outputs.json in TF_DIR"
+            sed -n '1,200p' "$TF_DIR/tf_outputs.json"
+          fi
 
       - name: Determine hosts (prefer secret, else use terraform artifact)
         id: compute-hosts
-        run: |          
+        run: |
           set -euo pipefail
           if [ -n "${{ secrets.HOSTS || '' }}" ]; then
             echo "hosts=${{ secrets.HOSTS }}" >> $GITHUB_OUTPUT
@@ -293,11 +300,11 @@ jobs:
           HOSTS=""
           if [ -f tf_outputs.json ]; then
             HOSTS=$(jq -r '.public_ips.value | join(",")' tf_outputs.json 2>/dev/null || true)
-          elif [ -f "${{ env.TF_DIR }}/tf_outputs.json" ]; then
-            HOSTS=$(jq -r '.public_ips.value | join(",")' "${{ env.TF_DIR }}/tf_outputs.json" 2>/dev/null || true)
+          elif [ -f "$TF_DIR/tf_outputs.json" ]; then
+            HOSTS=$(jq -r '.public_ips.value | join(",")' "$TF_DIR/tf_outputs.json" 2>/dev/null || true)
           fi
 
-          echo "Determined hosts (from artifact/needs/secrets): ${HOSTS}"
+          echo "Determined hosts: ${HOSTS}"
           echo "hosts=${HOSTS}" >> $GITHUB_OUTPUT
 
       - name: Build inventory from computed hosts
