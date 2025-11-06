@@ -284,21 +284,41 @@ jobs:
 
       - name: Build inventory from computed hosts
         run: |
-          mkdir -p inventory
-          echo "[java_servers]" > inventory/hosts.ini
-          HOSTS="${{ steps.compute-hosts.outputs.hosts }}"
-          if [ -n "$HOSTS" ]; then
-            IFS=',' read -ra ADDR <<< "$HOSTS"
-            for h in "${ADDR[@]}"; do
-              USER="${{ secrets.SSH_USER || 'ec2-user' }}"
-              echo "${h} ansible_user=${USER} ansible_ssh_private_key_file=./id_rsa ansible_host=${h}" >> inventory/hosts.ini
-            done
-            echo "Inventory:"
-            cat inventory/hosts.ini
-          else
-            echo "No hosts found. Ensure either secrets.HOSTS or terraform outputs.public_ips exist."
+          set -euo pipefail
+          if [ -n "${{ secrets.HOSTS || '' }}" ]; then
+            RAW_HOSTS="${{ secrets.HOSTS }}"
+          fi
+          if [ -z "${RAW_HOSTS:-}" ] && [ -n "${{ needs.terraform-apply.outputs.hosts || '' }}" ]; then
+            RAW_HOSTS="${{ needs.terraform-apply.outputs.hosts }}"
+          fi
+          if [ -z "${RAW_HOSTS:-}" ]; then
+            if [ -f tf_outputs.json ]; then
+              RAW_HOSTS=$(jq -r '.public_ips.value | join(",")' tf_outputs.json 2>/dev/null || true)
+            elif [ -f "$TF_DIR/tf_outputs.json" ]; then
+              RAW_HOSTS=$(jq -r '.public_ips.value | join(",")' "$TF_DIR/tf_outputs.json" 2>/dev/null || true)
+            fi
+          fi
+
+          echo "DEBUG: raw hosts value='${RAW_HOSTS:-}'"
+
+          if [ -z "${NORM}" ]; then
+            echo "No hosts found. Ensure either secrets.HOSTS, needs.terraform-apply.outputs.hosts, or tf_outputs.json exist."
             exit 1
           fi
+
+          mkdir -p inventory
+          echo "[java_servers]" > inventory/hosts.ini
+
+          IFS=',' read -ra ADDR <<< "$NORM"
+          for h in "${ADDR[@]}"; do
+            if [ -n "$h" ]; then
+              USER="${{ secrets.SSH_USER || 'ec2-user' }}"
+              echo "${h} ansible_user=${USER} ansible_ssh_private_key_file=./id_rsa ansible_host=${h}" >> inventory/hosts.ini
+            fi
+          done
+
+          echo "Inventory:"
+          cat inventory/hosts.ini
 
       - name: Add hosts to known_hosts (ssh-keyscan)
         run: |
