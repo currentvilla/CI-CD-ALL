@@ -1,4 +1,4 @@
-name: CI (Terraform plan/apply) and Deploy Java #1
+name: CI (Terraform plan/apply) and Deploy Java
 
 on:
   pull_request:
@@ -12,7 +12,7 @@ permissions:
   contents: read
 
 env:
-  TF_DIR: tf    
+  TF_DIR: tf
 
 jobs:
   terraform-plan:
@@ -49,44 +49,30 @@ jobs:
       - name: Prepare optional ssh.auto.tfvars (from secret) if provided
         if: env.SSH_PUB_KEY != ''
         run: |
-          # remove any previous file to avoid leftover incorrect content
           rm -f ssh.auto.tfvars
-          # create a proper tfvars file (use double quotes for Terraform)
-          cat > ssh.auto.tfvars <<'EOF'
+          cat > ssh.auto.tfvars <<-'EOF'
           ssh_public_key = "${{ secrets.SSH_PUB_KEY }}"
           EOF
-          echo "Created ssh.auto.tfvars (length: $(wc -c < ssh.auto.tfvars) bytes)"
-
-      - name: "Debug: list TF dir files"
-        run: |
-          ls -la
+          echo "Created ssh.auto.tfvars (length: $(wc -c < ssh.auto.tfvars 2>/dev/null || echo 0) bytes)"
 
       - name: Terraform Plan (create plan.tfplan)
         id: plan
         run: |
           set -euo pipefail
-          # run terraform plan, output plan.tfplan in current directory
           terraform plan -input=false -no-color -out=plan.tfplan || true
-
           if [ -f plan.tfplan ]; then
             terraform show -no-color plan.tfplan > plan.txt || true
             head -n 200 plan.txt > plan_summary.txt || true
           else
-            echo "No plan.tfplan produced (plan may have failed)."
-            echo "" > plan_summary.txt
+            echo "No plan.tfplan produced (plan may have failed)." > plan_summary.txt
           fi
 
-      - name: "Debug: list TF dir files"
-        run: |
-          ls -la
-
-      - name: Debug before upload - show absolute paths
+      - name: Debug before upload - show TF dir
         run: |
           echo "Workspace: $GITHUB_WORKSPACE"
-          echo "TF_DIR: ${{ env.TF_DIR }}"
-          ls -la "${{ env.TF_DIR }}" || true
-          stat -c '%n %s' "${{ env.TF_DIR }}/plan.tfplan" || true
-
+          echo "TF_DIR: $TF_DIR"
+          ls -la "${TF_DIR}" || true
+          stat -c '%n %s' "${TF_DIR}/plan.tfplan" || true
 
       - name: Upload plan artifact
         if: always()
@@ -100,15 +86,15 @@ jobs:
   terraform-apply:
     name: Terraform - Apply
     runs-on: ubuntu-latest
-    env:
-      SSH_PUB_KEY: ${{ secrets.SSH_PUB_KEY || '' }}
     needs: terraform-plan
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    env:
+      SSH_PUB_KEY: ${{ secrets.SSH_PUB_KEY || '' }}
     defaults:
       run:
         working-directory: ${{ env.TF_DIR }}
     outputs:
-      hosts: ${{ steps.set-hosts.outputs.hosts }}
+      hosts: ${{ steps.set-hosts.outputs.hosts || '' }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -136,7 +122,6 @@ jobs:
         id: prepare-plan
         run: |
           set -euo pipefail
-          # if download-artifact created terraform-plan/plan.tfplan put it in working dir
           if [ -f plan.tfplan ]; then
             echo "plan.tfplan already present in TF_DIR"
           elif [ -f terraform-plan/plan.tfplan ]; then
@@ -151,12 +136,11 @@ jobs:
       - name: Prepare optional ssh.auto.tfvars (from secret) if provided
         if: env.SSH_PUB_KEY != ''
         run: |
-          # create ssh.auto.tfvars that Terraform can parse
-          # Use a normal quoted string in tfvars (avoid <<'KEY' which caused parse errors)
-          cat > ssh.auto.tfvars <<'EOF'
+          rm -f ssh.auto.tfvars
+          cat > ssh.auto.tfvars <<-'EOF'
           ssh_public_key = "${{ secrets.SSH_PUB_KEY }}"
           EOF
-          echo "Created ssh.auto.tfvars (length: $(wc -c < ssh.auto.tfvars) bytes)"
+          echo "Created ssh.auto.tfvars (length: $(wc -c < ssh.auto.tfvars 2>/dev/null || echo 0) bytes)"
 
       - name: Terraform Apply (use plan.tfplan if present)
         id: tf_apply
@@ -170,11 +154,10 @@ jobs:
             terraform plan -input=false -no-color -out=plan.tfplan
             terraform apply -input=false -auto-approve plan.tfplan
           fi
-      
+
       - name: Dump terraform outputs (json) and save
         run: |
           set -euo pipefail
-          cd ${{ env.TF_DIR }}
           terraform output -json > tf_outputs.json || true
           echo "PWD: $(pwd)"
           echo "ls -la:"
@@ -189,14 +172,6 @@ jobs:
           name: tf-outputs
           path: ${{ env.TF_DIR }}/tf_outputs.json
 
-
-      - name: Upload tf_outputs.json artifact
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: tf-outputs
-          path: tf_outputs.json
-
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
 
@@ -207,8 +182,8 @@ jobs:
           HOSTS=""
           if [ -f tf_outputs.json ]; then
             JSON_FILE="tf_outputs.json"
-          elif [ -f ${{ env.TF_DIR }}/tf_outputs.json ]; then
-            JSON_FILE="${{ env.TF_DIR }}/tf_outputs.json"
+          elif [ -f $TF_DIR/tf_outputs.json ]; then
+            JSON_FILE="$TF_DIR/tf_outputs.json"
           else
             terraform output -json > tf_outputs.json || true
             JSON_FILE="tf_outputs.json"
