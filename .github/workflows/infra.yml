@@ -289,19 +289,52 @@ jobs:
       - name: Build inventory from computed hosts
         run: |
           set -euo pipefail
+
+          # 1) まず compute-hosts の出力（ステップ出力）を優先して取得
+          RAW_HOSTS="${{ steps.compute-hosts.outputs.hosts || '' }}"
+
+          # 2) 次に secrets.HOSTS があれば上書き（管理者が明示的に上書きする場合）
           if [ -n "${{ secrets.HOSTS || '' }}" ]; then
             RAW_HOSTS="${{ secrets.HOSTS }}"
           fi
-          if [ -z "${RAW_HOSTS:-}" ] && [ -n "${{ needs.terraform-apply.outputs.hosts || '' }}" ]; then
+
+          # 3) 次に needs.terraform-apply.outputs.hosts を試す（古いフロー互換）
+          if [ -z "${RAW_HOSTS}" ] && [ -n "${{ needs.terraform-apply.outputs.hosts || '' }}" ]; then
             RAW_HOSTS="${{ needs.terraform-apply.outputs.hosts }}"
           fi
-          if [ -z "${RAW_HOSTS:-}" ]; then
+
+          # 4) 最後に artifact/tf_outputs.json から抽出（fallback）
+          if [ -z "${RAW_HOSTS}" ]; then
             if [ -f tf_outputs.json ]; then
               RAW_HOSTS=$(jq -r '.public_ips.value | join(",")' tf_outputs.json 2>/dev/null || true)
             elif [ -f "$TF_DIR/tf_outputs.json" ]; then
               RAW_HOSTS=$(jq -r '.public_ips.value | join(",")' "$TF_DIR/tf_outputs.json" 2>/dev/null || true)
             fi
           fi
+
+          echo "DEBUG: raw hosts value='${RAW_HOSTS:-}'"
+
+          # 5) 正規化（空白・改行をカンマ化、重複カンマ排除、先頭末尾カンマ削除）
+          NORM=$(printf "%s" "${RAW_HOSTS:-}" | tr -s ' \n' ',' | sed 's/,,*/,/g' | sed 's/^,//;s/,$//')
+
+          if [ -z "${NORM}" ]; then
+            echo "No hosts found. Ensure compute-hosts output, secrets.HOSTS, needs.terraform-apply.outputs.hosts, or tf_outputs.json exist."
+            exit 1
+          fi
+
+          mkdir -p inventory
+          echo "[java_servers]" > inventory/hosts.ini
+
+          IFS=',' read -ra ADDR <<< "$NORM"
+          for h in "${ADDR[@]}"; do
+            if [ -n "$h" ]; then
+              USER="${{ secrets.SSH_USER || 'ec2-user' }}"
+          echo "${h} ansible_user=${USER} ansible_ssh_private_key_file=./id_rsa ansible_host=${h}" >> inventory/hosts.ini
+            fi
+          done
+
+          echo "Inventory:"
+          cat inventory/hosts.ini
 
           echo "DEBUG: raw hosts value='${RAW_HOSTS:-}'"
 
