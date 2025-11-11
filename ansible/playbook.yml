@@ -147,10 +147,6 @@
         state: started
       register: systemd_result
 
-    - name: Print debug_service stdout
-      ansible.builtin.debug:
-        var: debug_service.stdout_lines
-
     - name: Wait for app port to be open
       ansible.builtin.wait_for:
         host: "{{ ansible_host | default(inventory_hostname) }}"
