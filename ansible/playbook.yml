@@ -5,7 +5,7 @@
   gather_facts: true
 
   vars:
-    java_version: 11
+    java_version: 17
     app_user: ec2-user              # Inventory / Secrets の SSH_USER に合わせて変更
     app_dir: /opt/springapp
     jar_url: "{{ lookup('env','SPRING_BOOT_JAR_URL') | default('') }}"  # 空ならダウンロードはスキップ
@@ -146,6 +146,10 @@
         enabled: true
         state: started
       register: systemd_result
+
+    - name: Print debug_service stdout
+      ansible.builtin.debug:
+        var: debug_service.stdout_lines
 
     - name: Wait for app port to be open
       ansible.builtin.wait_for:
