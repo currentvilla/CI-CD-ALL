@@ -1,3 +1,4 @@
+#PR提出用
 resource "aws_instance" "ci-cd-all-ec2" {
   count         = 1
   ami           = "ami-025bbcfb04b076789"

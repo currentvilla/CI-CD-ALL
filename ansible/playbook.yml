@@ -1,3 +1,4 @@
+#PR提出用
 ---
 - name: Install Java (Corretto then fallback) and deploy Spring Boot
   hosts: java_servers

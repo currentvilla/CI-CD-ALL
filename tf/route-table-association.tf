@@ -1,3 +1,4 @@
+#PR提出用
 resource "aws_route_table_association" "pubsub_a" {
   subnet_id      = aws_subnet.pubsub_a.id
   route_table_id = aws_route_table.public-rt.id

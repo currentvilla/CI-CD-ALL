@@ -1,3 +1,4 @@
+#PR提出用
 resource "aws_route_table" "public-rt" {
   vpc_id = aws_vpc.ci-cd-all-vpc.id
 
