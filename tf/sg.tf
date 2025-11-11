@@ -1,3 +1,4 @@
+#PR提出用
 resource "aws_security_group" "ci-cd-all-sg" {
   name   = "ci-cd-all-sg"
   vpc_id = aws_vpc.ci-cd-all-vpc.id
