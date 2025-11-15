@@ -6,5 +6,5 @@ Terraform・Ansibleを組み合わせて、AWSにリソースを作成後、EC2�
 その後、Ansibleを使って、Javaのspringbootが動いているかどうかを確認し、動いていれば課題完了とする。
 
 ## 技術スタック
-Infra: AWS, Terraform
-CI/CD: GitHub Actions, Ansible
+- Infra: AWS, Terraform
+- CI/CD: GitHub Actions, Ansible
