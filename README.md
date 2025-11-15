@@ -7,4 +7,4 @@ Terraform・Ansibleを組み合わせて、AWSにリソースを作成後、EC2�
 
 ## 技術スタック
 Infra: AWS, Terraform
-CI/CD: GitHub Actions
+CI/CD: GitHub Actions, Ansible
